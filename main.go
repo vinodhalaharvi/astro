@@ -203,6 +203,30 @@ type GoFunction struct {
 	Level      int
 }
 
+type GoVariable struct {
+	Name     string
+	Package  string
+	Type     string
+	Position string
+	Level    int
+}
+
+type GoConstant struct {
+	Name     string
+	Package  string
+	Type     string
+	Value    string
+	Position string
+	Level    int
+}
+
+type GoImport struct {
+	Name     string
+	Path     string
+	Position string
+	Level    int
+}
+
 type StructNodeVisitor struct {
 	fset *token.FileSet
 	pkg  string
@@ -471,6 +495,420 @@ func (iin *InterfaceImplementationNamer) GetImplementationName(item GoInterface)
 	return fmt.Sprintf("NoOp%s", item.Name)
 }
 
+type FunctionNodeVisitor struct {
+	fset *token.FileSet
+	pkg  string
+}
+
+func NewFunctionNodeVisitor(fset *token.FileSet, pkg string) *FunctionNodeVisitor {
+	return &FunctionNodeVisitor{fset: fset, pkg: pkg}
+}
+
+func (fnv *FunctionNodeVisitor) VisitNode(node ast.Node) GoFunction {
+	if fn, ok := node.(*ast.FuncDecl); ok {
+		receiver := ""
+		if fn.Recv != nil && len(fn.Recv.List) > 0 {
+			receiver = formatType(fn.Recv.List[0].Type)
+		}
+
+		params := make([]string, 0)
+		if fn.Type.Params != nil {
+			for _, param := range fn.Type.Params.List {
+				paramType := formatType(param.Type)
+				if len(param.Names) > 0 {
+					for _, name := range param.Names {
+						params = append(params, fmt.Sprintf("%s %s", name.Name, paramType))
+					}
+				} else {
+					params = append(params, paramType)
+				}
+			}
+		}
+
+		returns := make([]string, 0)
+		if fn.Type.Results != nil {
+			for _, result := range fn.Type.Results.List {
+				resultType := formatType(result.Type)
+				if len(result.Names) > 0 {
+					for _, name := range result.Names {
+						returns = append(returns, fmt.Sprintf("%s %s", name.Name, resultType))
+					}
+				} else {
+					returns = append(returns, resultType)
+				}
+			}
+		}
+
+		return GoFunction{
+			Name:       fn.Name.Name,
+			Package:    fnv.pkg,
+			Receiver:   receiver,
+			Parameters: params,
+			Returns:    returns,
+			Position:   fnv.fset.Position(fn.Pos()).String(),
+		}
+	}
+	return GoFunction{}
+}
+
+type FunctionResultCollector struct {
+	results []GoFunction
+}
+
+func NewFunctionResultCollector() *FunctionResultCollector {
+	return &FunctionResultCollector{results: make([]GoFunction, 0)}
+}
+
+func (frc *FunctionResultCollector) CollectResults() []GoFunction {
+	return frc.results
+}
+
+func (frc *FunctionResultCollector) AddResult(item GoFunction) {
+	frc.results = append(frc.results, item)
+}
+
+type FunctionValidator struct{}
+
+func (fv *FunctionValidator) IsValid(item GoFunction) bool {
+	return item.Name != ""
+}
+
+type FunctionDependencyExtractor struct{}
+
+func (fde *FunctionDependencyExtractor) ExtractDependencies(item GoFunction) []string {
+	deps := make(map[string]bool)
+
+	// Dependencies from receiver
+	if item.Receiver != "" {
+		receiverDeps := extractTypeDependencies(item.Receiver)
+		for _, dep := range receiverDeps {
+			deps[dep] = true
+		}
+	}
+
+	// Dependencies from parameters
+	for _, param := range item.Parameters {
+		paramDeps := extractTypeDependencies(param)
+		for _, dep := range paramDeps {
+			deps[dep] = true
+		}
+	}
+
+	// Dependencies from return types
+	for _, ret := range item.Returns {
+		retDeps := extractTypeDependencies(ret)
+		for _, dep := range retDeps {
+			deps[dep] = true
+		}
+	}
+
+	result := make([]string, 0, len(deps))
+	for dep := range deps {
+		result = append(result, dep)
+	}
+	return result
+}
+
+type FunctionTypeNameProvider struct{}
+
+func (ftnp *FunctionTypeNameProvider) GetTypeName(item GoFunction) string {
+	if item.Receiver != "" {
+		return fmt.Sprintf("%s.%s", item.Receiver, item.Name)
+	}
+	return item.Name
+}
+
+type FunctionPackageProvider struct{}
+
+func (fpp *FunctionPackageProvider) GetPackage(item GoFunction) string {
+	return item.Package
+}
+
+type FunctionItemRenderer struct{}
+
+func (fir *FunctionItemRenderer) RenderItem(item GoFunction) string {
+	if item.Name == "" {
+		return ""
+	}
+	result := fmt.Sprintf("Function: %s (Package: %s) at %s", item.Name, item.Package, item.Position)
+	if item.Receiver != "" {
+		result = fmt.Sprintf("Method: %s (Receiver: %s, Package: %s) at %s", item.Name, item.Receiver, item.Package, item.Position)
+	}
+	if len(item.Parameters) > 0 {
+		result += fmt.Sprintf("\n  Parameters: %s", strings.Join(item.Parameters, ", "))
+	}
+	if len(item.Returns) > 0 {
+		result += fmt.Sprintf("\n  Returns: %s", strings.Join(item.Returns, ", "))
+	}
+	if item.Level > 0 {
+		result += fmt.Sprintf("\n  Level: %d", item.Level)
+	}
+	return result
+}
+
+type VariableNodeVisitor struct {
+	fset *token.FileSet
+	pkg  string
+}
+
+func NewVariableNodeVisitor(fset *token.FileSet, pkg string) *VariableNodeVisitor {
+	return &VariableNodeVisitor{fset: fset, pkg: pkg}
+}
+
+func (vnv *VariableNodeVisitor) VisitNode(node ast.Node) GoVariable {
+	if vs, ok := node.(*ast.ValueSpec); ok {
+		for i, name := range vs.Names {
+			varType := ""
+			if vs.Type != nil {
+				varType = formatType(vs.Type)
+			} else if len(vs.Values) > i {
+				varType = "inferred"
+			}
+
+			return GoVariable{
+				Name:     name.Name,
+				Package:  vnv.pkg,
+				Type:     varType,
+				Position: vnv.fset.Position(name.Pos()).String(),
+			}
+		}
+	}
+	return GoVariable{}
+}
+
+type VariableResultCollector struct {
+	results []GoVariable
+}
+
+func NewVariableResultCollector() *VariableResultCollector {
+	return &VariableResultCollector{results: make([]GoVariable, 0)}
+}
+
+func (vrc *VariableResultCollector) CollectResults() []GoVariable {
+	return vrc.results
+}
+
+func (vrc *VariableResultCollector) AddResult(item GoVariable) {
+	vrc.results = append(vrc.results, item)
+}
+
+type VariableValidator struct{}
+
+func (vv *VariableValidator) IsValid(item GoVariable) bool {
+	return item.Name != ""
+}
+
+type VariableDependencyExtractor struct{}
+
+func (vde *VariableDependencyExtractor) ExtractDependencies(item GoVariable) []string {
+	return extractTypeDependencies(item.Type)
+}
+
+type VariableTypeNameProvider struct{}
+
+func (vtnp *VariableTypeNameProvider) GetTypeName(item GoVariable) string {
+	return item.Name
+}
+
+type VariablePackageProvider struct{}
+
+func (vpp *VariablePackageProvider) GetPackage(item GoVariable) string {
+	return item.Package
+}
+
+type VariableItemRenderer struct{}
+
+func (vir *VariableItemRenderer) RenderItem(item GoVariable) string {
+	if item.Name == "" {
+		return ""
+	}
+	result := fmt.Sprintf("Variable: %s %s (Package: %s) at %s", item.Name, item.Type, item.Package, item.Position)
+	if item.Level > 0 {
+		result += fmt.Sprintf("\n  Level: %d", item.Level)
+	}
+	return result
+}
+
+type ConstantNodeVisitor struct {
+	fset *token.FileSet
+	pkg  string
+}
+
+func NewConstantNodeVisitor(fset *token.FileSet, pkg string) *ConstantNodeVisitor {
+	return &ConstantNodeVisitor{fset: fset, pkg: pkg}
+}
+
+func (cnv *ConstantNodeVisitor) VisitNode(node ast.Node) GoConstant {
+	if vs, ok := node.(*ast.ValueSpec); ok {
+		for i, name := range vs.Names {
+			constType := ""
+			if vs.Type != nil {
+				constType = formatType(vs.Type)
+			}
+
+			value := ""
+			if len(vs.Values) > i {
+				value = formatExpr(vs.Values[i])
+			}
+
+			return GoConstant{
+				Name:     name.Name,
+				Package:  cnv.pkg,
+				Type:     constType,
+				Value:    value,
+				Position: cnv.fset.Position(name.Pos()).String(),
+			}
+		}
+	}
+	return GoConstant{}
+}
+
+type ConstantResultCollector struct {
+	results []GoConstant
+}
+
+func NewConstantResultCollector() *ConstantResultCollector {
+	return &ConstantResultCollector{results: make([]GoConstant, 0)}
+}
+
+func (crc *ConstantResultCollector) CollectResults() []GoConstant {
+	return crc.results
+}
+
+func (crc *ConstantResultCollector) AddResult(item GoConstant) {
+	crc.results = append(crc.results, item)
+}
+
+type ConstantValidator struct{}
+
+func (cv *ConstantValidator) IsValid(item GoConstant) bool {
+	return item.Name != ""
+}
+
+type ConstantDependencyExtractor struct{}
+
+func (cde *ConstantDependencyExtractor) ExtractDependencies(item GoConstant) []string {
+	return extractTypeDependencies(item.Type)
+}
+
+type ConstantTypeNameProvider struct{}
+
+func (ctnp *ConstantTypeNameProvider) GetTypeName(item GoConstant) string {
+	return item.Name
+}
+
+type ConstantPackageProvider struct{}
+
+func (cpp *ConstantPackageProvider) GetPackage(item GoConstant) string {
+	return item.Package
+}
+
+type ConstantItemRenderer struct{}
+
+func (cir *ConstantItemRenderer) RenderItem(item GoConstant) string {
+	if item.Name == "" {
+		return ""
+	}
+	result := fmt.Sprintf("Constant: %s", item.Name)
+	if item.Type != "" {
+		result += fmt.Sprintf(" %s", item.Type)
+	}
+	if item.Value != "" {
+		result += fmt.Sprintf(" = %s", item.Value)
+	}
+	result += fmt.Sprintf(" (Package: %s) at %s", item.Package, item.Position)
+	if item.Level > 0 {
+		result += fmt.Sprintf("\n  Level: %d", item.Level)
+	}
+	return result
+}
+
+type ImportNodeVisitor struct {
+	fset *token.FileSet
+}
+
+func NewImportNodeVisitor(fset *token.FileSet) *ImportNodeVisitor {
+	return &ImportNodeVisitor{fset: fset}
+}
+
+func (inv *ImportNodeVisitor) VisitNode(node ast.Node) GoImport {
+	if is, ok := node.(*ast.ImportSpec); ok {
+		name := ""
+		if is.Name != nil {
+			name = is.Name.Name
+		}
+
+		path := ""
+		if is.Path != nil {
+			path = is.Path.Value
+		}
+
+		return GoImport{
+			Name:     name,
+			Path:     path,
+			Position: inv.fset.Position(is.Pos()).String(),
+		}
+	}
+	return GoImport{}
+}
+
+type ImportResultCollector struct {
+	results []GoImport
+}
+
+func NewImportResultCollector() *ImportResultCollector {
+	return &ImportResultCollector{results: make([]GoImport, 0)}
+}
+
+func (irc *ImportResultCollector) CollectResults() []GoImport {
+	return irc.results
+}
+
+func (irc *ImportResultCollector) AddResult(item GoImport) {
+	irc.results = append(irc.results, item)
+}
+
+type ImportValidator struct{}
+
+func (iv *ImportValidator) IsValid(item GoImport) bool {
+	return item.Path != ""
+}
+
+type ImportDependencyExtractor struct{}
+
+func (ide *ImportDependencyExtractor) ExtractDependencies(item GoImport) []string {
+	return []string{} // Imports don't have dependencies in our model
+}
+
+type ImportTypeNameProvider struct{}
+
+func (itnp *ImportTypeNameProvider) GetTypeName(item GoImport) string {
+	return item.Path
+}
+
+type ImportPackageProvider struct{}
+
+func (ipp *ImportPackageProvider) GetPackage(item GoImport) string {
+	return item.Path
+}
+
+type ImportItemRenderer struct{}
+
+func (iir *ImportItemRenderer) RenderItem(item GoImport) string {
+	if item.Path == "" {
+		return ""
+	}
+	result := fmt.Sprintf("Import: %s", item.Path)
+	if item.Name != "" && item.Name != "." {
+		result = fmt.Sprintf("Import: %s as %s", item.Path, item.Name)
+	}
+	result += fmt.Sprintf(" at %s", item.Position)
+	if item.Level > 0 {
+		result += fmt.Sprintf("\n  Level: %d", item.Level)
+	}
+	return result
+}
+
 type TopologicalDependencyResolver[T any] struct {
 	dependencyExtractor DependencyExtractor[T]
 	typeNameProvider    TypeNameProvider[T]
@@ -558,6 +996,31 @@ func (tdr *TopologicalDependencyResolver[T]) ResolveDependencies(items []T) []T 
 			result = append(result, item)
 		}
 	}
+
+	return result
+}
+
+type AlphabeticalDependencyResolver[T any] struct {
+	typeNameProvider TypeNameProvider[T]
+}
+
+func NewAlphabeticalDependencyResolver[T any](
+	nameProvider TypeNameProvider[T],
+) *AlphabeticalDependencyResolver[T] {
+	return &AlphabeticalDependencyResolver[T]{
+		typeNameProvider: nameProvider,
+	}
+}
+
+func (adr *AlphabeticalDependencyResolver[T]) ResolveDependencies(items []T) []T {
+	result := make([]T, len(items))
+	copy(result, items)
+
+	sort.Slice(result, func(i, j int) bool {
+		nameI := adr.typeNameProvider.GetTypeName(result[i])
+		nameJ := adr.typeNameProvider.GetTypeName(result[j])
+		return nameI < nameJ
+	})
 
 	return result
 }
@@ -699,7 +1162,7 @@ func isBuiltinType(name string) bool {
 		"int8": true, "int16": true, "int32": true, "int64": true,
 		"rune": true, "string": true, "uint": true, "uint8": true,
 		"uint16": true, "uint32": true, "uint64": true, "uintptr": true,
-		"interface": true, "func": true, "struct": true,
+		"interface": true, "func": true, "struct": true, "any": true,
 	}
 	return builtins[name]
 }
@@ -740,12 +1203,22 @@ func formatType(expr ast.Expr) string {
 		return fmt.Sprintf("[%s]%s", formatExpr(t.Len), formatType(t.Elt))
 	case *ast.MapType:
 		return fmt.Sprintf("map[%s]%s", formatType(t.Key), formatType(t.Value))
+	case *ast.ChanType:
+		dir := ""
+		if t.Dir == ast.SEND {
+			dir = "<-"
+		} else if t.Dir == ast.RECV {
+			dir = "<-"
+		}
+		return fmt.Sprintf("%schan %s", dir, formatType(t.Value))
 	case *ast.FuncType:
 		return formatFuncType(t)
 	case *ast.InterfaceType:
 		return "interface{}"
 	case *ast.SelectorExpr:
 		return fmt.Sprintf("%s.%s", formatType(t.X), t.Sel.Name)
+	case *ast.IndexExpr:
+		return fmt.Sprintf("%s[%s]", formatType(t.X), formatType(t.Index))
 	default:
 		return "unknown"
 	}
@@ -805,6 +1278,10 @@ func formatExpr(expr ast.Expr) string {
 		return e.Value
 	case *ast.Ident:
 		return e.Name
+	case *ast.BinaryExpr:
+		return fmt.Sprintf("%s %s %s", formatExpr(e.X), e.Op.String(), formatExpr(e.Y))
+	case *ast.UnaryExpr:
+		return fmt.Sprintf("%s%s", e.Op.String(), formatExpr(e.X))
 	default:
 		return "complex_expr"
 	}
@@ -924,52 +1401,46 @@ func getZeroValue(typ string) string {
 	}
 }
 
-func main() {
-	var (
-		dirs        = flag.String("dirs", ".", "Comma-separated list of directories to analyze")
-		showStructs = flag.Bool("structs", false, "Show structs")
-		showIfaces  = flag.Bool("interfaces", false, "Show interfaces")
-		genNoOp     = flag.Bool("noop", false, "Generate NoOp implementations for interfaces")
-		noOpDir     = flag.String("noop-dir", "./noop", "Directory to save NoOp implementations")
-	)
-
-	flag.Parse()
-
-	if *genNoOp && *noOpDir != "" {
-		if err := os.MkdirAll(*noOpDir, 0755); err != nil {
-			log.Fatalf("Failed to create NoOp directory %s: %v", *noOpDir, err)
+func analyzeDecl(decl ast.Decl, engines map[string]interface{}) {
+	switch d := decl.(type) {
+	case *ast.GenDecl:
+		switch d.Tok {
+		case token.TYPE:
+			for _, spec := range d.Specs {
+				if engine, ok := engines["structs"].(*AnalysisEngine[GoStruct]); ok {
+					engine.Analyze(spec)
+				}
+				if engine, ok := engines["interfaces"].(*AnalysisEngine[GoInterface]); ok {
+					engine.Analyze(spec)
+				}
+			}
+		case token.VAR:
+			if engine, ok := engines["variables"].(*AnalysisEngine[GoVariable]); ok {
+				for _, spec := range d.Specs {
+					engine.Analyze(spec)
+				}
+			}
+		case token.CONST:
+			if engine, ok := engines["constants"].(*AnalysisEngine[GoConstant]); ok {
+				for _, spec := range d.Specs {
+					engine.Analyze(spec)
+				}
+			}
+		case token.IMPORT:
+			if engine, ok := engines["imports"].(*AnalysisEngine[GoImport]); ok {
+				for _, spec := range d.Specs {
+					engine.Analyze(spec)
+				}
+			}
 		}
-	}
-
-	directories := strings.Split(*dirs, ",")
-
-	for _, dir := range directories {
-		dir = strings.TrimSpace(dir)
-		if dir == "" {
-			continue
-		}
-
-		if err := walkDirectory(dir, *showStructs, *showIfaces, *genNoOp, *noOpDir); err != nil {
-			log.Printf("Error analyzing directory %s: %v", dir, err)
+	case *ast.FuncDecl:
+		if engine, ok := engines["functions"].(*AnalysisEngine[GoFunction]); ok {
+			engine.Analyze(d)
 		}
 	}
 }
 
-func walkDirectory(dir string, showStructs, showIfaces, genNoOp bool, noOpDir string) error {
-	return filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-
-		if !info.IsDir() && strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_test.go") {
-			return processFile(path, showStructs, showIfaces, genNoOp, noOpDir)
-		}
-
-		return nil
-	})
-}
-
-func processFile(filename string, showStructs, showIfaces, genNoOp bool, noOpDir string) error {
+func processFile(filename string, selectedTypes map[string]bool, useTopologicalSort, genNoOp bool, noOpDir string) error {
 	fset := token.NewFileSet()
 	node, err := parser.ParseFile(fset, filename, nil, parser.ParseComments)
 	if err != nil {
@@ -979,24 +1450,35 @@ func processFile(filename string, showStructs, showIfaces, genNoOp bool, noOpDir
 	pkg := node.Name.Name
 	fmt.Printf("\n=== Analyzing file: %s ===\n", filename)
 
-	if showStructs {
-		fmt.Println("\n--- Structs (Dependency Order) ---")
+	// Create analysis engines for selected types
+	engines := make(map[string]interface{})
 
-		// Build struct analysis engine with segregated interfaces
+	if selectedTypes["structs"] {
 		structVisitor := NewGenericVisitor(
 			NewStructNodeVisitor(fset, pkg),
 			NewStructResultCollector(),
 			&StructValidator{},
 		)
 
-		structSorter := NewDependencySorter(
-			&StructDependencyExtractor{},
-			&StructTypeNameProvider{},
-			NewTopologicalDependencyResolver(
+		var structSorter ItemSorter[GoStruct]
+		if useTopologicalSort {
+			structSorter = NewDependencySorter(
 				&StructDependencyExtractor{},
 				&StructTypeNameProvider{},
-			),
-		)
+				NewTopologicalDependencyResolver(
+					&StructDependencyExtractor{},
+					&StructTypeNameProvider{},
+				),
+			)
+		} else {
+			structSorter = NewDependencySorter(
+				&StructDependencyExtractor{},
+				&StructTypeNameProvider{},
+				NewAlphabeticalDependencyResolver(
+					&StructTypeNameProvider{},
+				),
+			)
+		}
 
 		structFormatter := NewGenericFormatter(
 			&StructItemRenderer{},
@@ -1007,31 +1489,38 @@ func processFile(filename string, showStructs, showIfaces, genNoOp bool, noOpDir
 			structVisitor,
 			structSorter,
 			structFormatter,
-			nil, // No code generator for structs
+			nil,
 		)
 
-		structEngine.Analyze(node)
-		structEngine.PrintResults()
+		engines["structs"] = structEngine
 	}
 
-	if showIfaces {
-		fmt.Println("\n--- Interfaces (Dependency Order) ---")
-
-		// Build interface analysis engine with segregated interfaces
+	if selectedTypes["interfaces"] {
 		interfaceVisitor := NewGenericVisitor(
 			NewInterfaceNodeVisitor(fset, pkg),
 			NewInterfaceResultCollector(),
 			&InterfaceValidator{},
 		)
 
-		interfaceSorter := NewDependencySorter(
-			&InterfaceDependencyExtractor{},
-			&InterfaceTypeNameProvider{},
-			NewTopologicalDependencyResolver(
+		var interfaceSorter ItemSorter[GoInterface]
+		if useTopologicalSort {
+			interfaceSorter = NewDependencySorter(
 				&InterfaceDependencyExtractor{},
 				&InterfaceTypeNameProvider{},
-			),
-		)
+				NewTopologicalDependencyResolver(
+					&InterfaceDependencyExtractor{},
+					&InterfaceTypeNameProvider{},
+				),
+			)
+		} else {
+			interfaceSorter = NewDependencySorter(
+				&InterfaceDependencyExtractor{},
+				&InterfaceTypeNameProvider{},
+				NewAlphabeticalDependencyResolver(
+					&InterfaceTypeNameProvider{},
+				),
+			)
+		}
 
 		interfaceFormatter := NewGenericFormatter(
 			&InterfaceItemRenderer{},
@@ -1054,14 +1543,197 @@ func processFile(filename string, showStructs, showIfaces, genNoOp bool, noOpDir
 			interfaceCodeGen,
 		)
 
-		interfaceEngine.Analyze(node)
-		interfaceEngine.PrintResults()
+		engines["interfaces"] = interfaceEngine
+	}
+
+	if selectedTypes["functions"] {
+		functionVisitor := NewGenericVisitor(
+			NewFunctionNodeVisitor(fset, pkg),
+			NewFunctionResultCollector(),
+			&FunctionValidator{},
+		)
+
+		var functionSorter ItemSorter[GoFunction]
+		if useTopologicalSort {
+			functionSorter = NewDependencySorter(
+				&FunctionDependencyExtractor{},
+				&FunctionTypeNameProvider{},
+				NewTopologicalDependencyResolver(
+					&FunctionDependencyExtractor{},
+					&FunctionTypeNameProvider{},
+				),
+			)
+		} else {
+			functionSorter = NewDependencySorter(
+				&FunctionDependencyExtractor{},
+				&FunctionTypeNameProvider{},
+				NewAlphabeticalDependencyResolver(
+					&FunctionTypeNameProvider{},
+				),
+			)
+		}
+
+		functionFormatter := NewGenericFormatter(
+			&FunctionItemRenderer{},
+			&SimpleOutputFormatter[GoFunction]{},
+		)
+
+		functionEngine := NewAnalysisEngine(
+			functionVisitor,
+			functionSorter,
+			functionFormatter,
+			nil,
+		)
+
+		engines["functions"] = functionEngine
+	}
+
+	if selectedTypes["variables"] {
+		variableVisitor := NewGenericVisitor(
+			NewVariableNodeVisitor(fset, pkg),
+			NewVariableResultCollector(),
+			&VariableValidator{},
+		)
+
+		var variableSorter ItemSorter[GoVariable]
+		if useTopologicalSort {
+			variableSorter = NewDependencySorter(
+				&VariableDependencyExtractor{},
+				&VariableTypeNameProvider{},
+				NewTopologicalDependencyResolver(
+					&VariableDependencyExtractor{},
+					&VariableTypeNameProvider{},
+				),
+			)
+		} else {
+			variableSorter = NewDependencySorter(
+				&VariableDependencyExtractor{},
+				&VariableTypeNameProvider{},
+				NewAlphabeticalDependencyResolver(
+					&VariableTypeNameProvider{},
+				),
+			)
+		}
+
+		variableFormatter := NewGenericFormatter(
+			&VariableItemRenderer{},
+			&SimpleOutputFormatter[GoVariable]{},
+		)
+
+		variableEngine := NewAnalysisEngine(
+			variableVisitor,
+			variableSorter,
+			variableFormatter,
+			nil,
+		)
+
+		engines["variables"] = variableEngine
+	}
+
+	if selectedTypes["constants"] {
+		constantVisitor := NewGenericVisitor(
+			NewConstantNodeVisitor(fset, pkg),
+			NewConstantResultCollector(),
+			&ConstantValidator{},
+		)
+
+		var constantSorter ItemSorter[GoConstant]
+		if useTopologicalSort {
+			constantSorter = NewDependencySorter(
+				&ConstantDependencyExtractor{},
+				&ConstantTypeNameProvider{},
+				NewTopologicalDependencyResolver(
+					&ConstantDependencyExtractor{},
+					&ConstantTypeNameProvider{},
+				),
+			)
+		} else {
+			constantSorter = NewDependencySorter(
+				&ConstantDependencyExtractor{},
+				&ConstantTypeNameProvider{},
+				NewAlphabeticalDependencyResolver(
+					&ConstantTypeNameProvider{},
+				),
+			)
+		}
+
+		constantFormatter := NewGenericFormatter(
+			&ConstantItemRenderer{},
+			&SimpleOutputFormatter[GoConstant]{},
+		)
+
+		constantEngine := NewAnalysisEngine(
+			constantVisitor,
+			constantSorter,
+			constantFormatter,
+			nil,
+		)
+
+		engines["constants"] = constantEngine
+	}
+
+	if selectedTypes["imports"] {
+		importVisitor := NewGenericVisitor(
+			NewImportNodeVisitor(fset),
+			NewImportResultCollector(),
+			&ImportValidator{},
+		)
+
+		var importSorter ItemSorter[GoImport]
+		if useTopologicalSort {
+			importSorter = NewDependencySorter(
+				&ImportDependencyExtractor{},
+				&ImportTypeNameProvider{},
+				NewTopologicalDependencyResolver(
+					&ImportDependencyExtractor{},
+					&ImportTypeNameProvider{},
+				),
+			)
+		} else {
+			importSorter = NewDependencySorter(
+				&ImportDependencyExtractor{},
+				&ImportTypeNameProvider{},
+				NewAlphabeticalDependencyResolver(
+					&ImportTypeNameProvider{},
+				),
+			)
+		}
+
+		importFormatter := NewGenericFormatter(
+			&ImportItemRenderer{},
+			&SimpleOutputFormatter[GoImport]{},
+		)
+
+		importEngine := NewAnalysisEngine(
+			importVisitor,
+			importSorter,
+			importFormatter,
+			nil,
+		)
+
+		engines["imports"] = importEngine
+	}
+
+	// Analyze declarations
+	for _, decl := range node.Decls {
+		analyzeDecl(decl, engines)
+	}
+
+	// Print results for each selected type
+	if engine, ok := engines["structs"].(*AnalysisEngine[GoStruct]); ok {
+		fmt.Println("\n--- Structs (Dependency Order) ---")
+		engine.PrintResults()
+	}
+
+	if engine, ok := engines["interfaces"].(*AnalysisEngine[GoInterface]); ok {
+		fmt.Println("\n--- Interfaces (Dependency Order) ---")
+		engine.PrintResults()
 
 		// Generate NoOp file if requested
 		if genNoOp && noOpDir != "" {
 			baseFilename := filepath.Base(filename)
 			noOpFilename := filepath.Join(noOpDir, "noop_"+strings.TrimSuffix(baseFilename, ".go")+"_interfaces.go")
-			if err := interfaceEngine.GenerateCodeFile(noOpFilename); err != nil {
+			if err := engine.GenerateCodeFile(noOpFilename); err != nil {
 				log.Printf("Failed to generate NoOp file %s: %v", noOpFilename, err)
 			} else {
 				fmt.Printf("Generated NoOp implementations: %s\n", noOpFilename)
@@ -1069,5 +1741,129 @@ func processFile(filename string, showStructs, showIfaces, genNoOp bool, noOpDir
 		}
 	}
 
+	if engine, ok := engines["functions"].(*AnalysisEngine[GoFunction]); ok {
+		fmt.Println("\n--- Functions (Dependency Order) ---")
+		engine.PrintResults()
+	}
+
+	if engine, ok := engines["variables"].(*AnalysisEngine[GoVariable]); ok {
+		fmt.Println("\n--- Variables (Dependency Order) ---")
+		engine.PrintResults()
+	}
+
+	if engine, ok := engines["constants"].(*AnalysisEngine[GoConstant]); ok {
+		fmt.Println("\n--- Constants (Dependency Order) ---")
+		engine.PrintResults()
+	}
+
+	if engine, ok := engines["imports"].(*AnalysisEngine[GoImport]); ok {
+		fmt.Println("\n--- Imports (Dependency Order) ---")
+		engine.PrintResults()
+	}
+
 	return nil
+}
+
+func walkDirectory(dir string, selectedTypes map[string]bool, useTopologicalSort, genNoOp bool, noOpDir string) error {
+	return filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if !info.IsDir() && strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_test.go") {
+			return processFile(path, selectedTypes, useTopologicalSort, genNoOp, noOpDir)
+		}
+
+		return nil
+	})
+}
+
+func main() {
+	var (
+		dirs        = flag.String("dirs", ".", "Comma-separated list of directories to analyze")
+		showStructs = flag.Bool("structs", false, "Show structs")
+		showIfaces  = flag.Bool("interfaces", false, "Show interfaces")
+		showFuncs   = flag.Bool("functions", false, "Show functions")
+		showVars    = flag.Bool("variables", false, "Show variables")
+		showConsts  = flag.Bool("constants", false, "Show constants")
+		showImports = flag.Bool("imports", false, "Show imports")
+		showAll     = flag.Bool("all", false, "Show all types")
+		topoSort    = flag.Bool("topo", true, "Use topological sorting based on dependencies")
+		alphaSort   = flag.Bool("alpha", false, "Use alphabetical sorting instead of topological")
+		genNoOp     = flag.Bool("noop", false, "Generate NoOp implementations for interfaces")
+		noOpDir     = flag.String("noop-dir", "./noop", "Directory to save NoOp implementations")
+	)
+
+	flag.Parse()
+
+	useTopologicalSort := *topoSort && !*alphaSort
+
+	selectedTypes := make(map[string]bool)
+
+	if *showAll {
+		selectedTypes["structs"] = true
+		selectedTypes["interfaces"] = true
+		selectedTypes["functions"] = true
+		selectedTypes["variables"] = true
+		selectedTypes["constants"] = true
+		selectedTypes["imports"] = true
+	} else {
+		selectedTypes["structs"] = *showStructs
+		selectedTypes["interfaces"] = *showIfaces
+		selectedTypes["functions"] = *showFuncs
+		selectedTypes["variables"] = *showVars
+		selectedTypes["constants"] = *showConsts
+		selectedTypes["imports"] = *showImports
+	}
+
+	// If no specific type is selected, show all
+	hasSelection := false
+	for _, selected := range selectedTypes {
+		if selected {
+			hasSelection = true
+			break
+		}
+	}
+
+	if !hasSelection {
+		selectedTypes["structs"] = true
+		selectedTypes["interfaces"] = true
+		selectedTypes["functions"] = true
+		selectedTypes["variables"] = true
+		selectedTypes["constants"] = true
+		selectedTypes["imports"] = true
+	}
+
+	// Create NoOp output directory if needed
+	if *genNoOp && *noOpDir != "" {
+		if err := os.MkdirAll(*noOpDir, 0755); err != nil {
+			log.Fatalf("Failed to create NoOp directory %s: %v", *noOpDir, err)
+		}
+	}
+
+	directories := strings.Split(*dirs, ",")
+	sort.Strings(directories)
+
+	sortType := "Topological"
+	if !useTopologicalSort {
+		sortType = "Alphabetical"
+	}
+	fmt.Printf("Using %s sorting", sortType)
+	if *genNoOp {
+		fmt.Printf(" with NoOp generation enabled (output: %s)", *noOpDir)
+	}
+	fmt.Println()
+
+	for _, dir := range directories {
+		dir = strings.TrimSpace(dir)
+		if dir == "" {
+			continue
+		}
+
+		fmt.Printf("\n=== Analyzing directory: %s ===\n", dir)
+
+		if err := walkDirectory(dir, selectedTypes, useTopologicalSort, *genNoOp, *noOpDir); err != nil {
+			log.Printf("Error analyzing directory %s: %v", dir, err)
+		}
+	}
 }
